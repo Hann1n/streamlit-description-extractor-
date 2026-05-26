@@ -116,9 +116,21 @@ def horizontal_line_groups(img: np.ndarray, x1: int, x2: int) -> list[int]:
     return group_positions(strong, max_gap=10)
 
 
-def ocr_words(img: np.ndarray) -> list[dict]:
+def ocr_words(img: np.ndarray, max_width: int | None = None) -> list[dict]:
+    scale = 1.0
+    ocr_img = img
+    if max_width and img.shape[1] > max_width:
+        scale = max_width / img.shape[1]
+        ocr_img = cv2.resize(
+            img,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+
     data = pytesseract.image_to_data(
-        img,
+        ocr_img,
         lang="eng",
         config="--oem 3 --psm 6",
         output_type=pytesseract.Output.DICT,
@@ -137,10 +149,10 @@ def ocr_words(img: np.ndarray) -> list[dict]:
                 "text": cleaned,
                 "upper": cleaned.upper(),
                 "conf": conf,
-                "left": int(data["left"][idx]),
-                "top": int(data["top"][idx]),
-                "width": int(data["width"][idx]),
-                "height": int(data["height"][idx]),
+                "left": int(data["left"][idx] / scale),
+                "top": int(data["top"][idx] / scale),
+                "width": int(data["width"][idx] / scale),
+                "height": int(data["height"][idx] / scale),
             }
         )
     return words
@@ -160,7 +172,7 @@ def choose_page_orientation(img: np.ndarray) -> tuple[np.ndarray, int, dict | No
     best = (None, 0, None, -1.0)
     for angle in (0, 90, 180, 270):
         rotated = rotate_image(img, angle)
-        words = ocr_words(rotated)
+        words = ocr_words(rotated, max_width=1600)
         header = find_description_header(words)
         if header is None:
             score = 0.0
