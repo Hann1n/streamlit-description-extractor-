@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import cv2
 import numpy as np
@@ -34,6 +34,14 @@ class DescriptionItem:
     text: str
     raw_text: str
     bbox: tuple[int, int, int, int]
+
+
+ProgressCallback = Callable[[dict], None]
+
+
+def emit_progress(progress_callback: ProgressCallback | None, **event: object) -> None:
+    if progress_callback:
+        progress_callback(event)
 
 
 def render_pdf(pdf_path: Path, work_dir: Path, dpi: int) -> list[Path]:
@@ -335,7 +343,14 @@ def extract_page_items(
     page_num: int,
     first_line_only: bool,
     debug_dir: Path | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[DescriptionItem], dict]:
+    emit_progress(
+        progress_callback,
+        stage="orientation",
+        page=page_num,
+        message=f"{page_num}페이지: DESCRIPTION 헤더와 회전 방향 확인 중",
+    )
     rotated, angle, header = choose_page_orientation(img)
     meta = {
         "page": page_num,
@@ -344,10 +359,32 @@ def extract_page_items(
         "items": 0,
     }
     if rotated is None or header is None:
+        emit_progress(
+            progress_callback,
+            stage="page_done",
+            page=page_num,
+            items=0,
+            message=f"{page_num}페이지: DESCRIPTION 헤더를 찾지 못함",
+        )
         return [], meta
 
+    emit_progress(
+        progress_callback,
+        stage="table",
+        page=page_num,
+        rotation=angle,
+        message=f"{page_num}페이지: 테이블 경계와 DESCRIPTION 컬럼 찾는 중",
+    )
     bounds = find_column_bounds(rotated, header)
     if bounds is None:
+        emit_progress(
+            progress_callback,
+            stage="page_done",
+            page=page_num,
+            rotation=angle,
+            items=0,
+            message=f"{page_num}페이지: DESCRIPTION 컬럼 경계를 찾지 못함",
+        )
         return [], meta
 
     x1, x2 = bounds
@@ -355,8 +392,24 @@ def extract_page_items(
     header_center_y = header["top"] + header["height"] // 2
     lower_lines = [y for y in row_lines if y > header_center_y]
     if len(lower_lines) < 2:
+        emit_progress(
+            progress_callback,
+            stage="page_done",
+            page=page_num,
+            rotation=angle,
+            items=0,
+            message=f"{page_num}페이지: 행 경계를 찾지 못함",
+        )
         return [], meta
 
+    emit_progress(
+        progress_callback,
+        stage="ocr",
+        page=page_num,
+        rotation=angle,
+        rows=max(0, len(lower_lines) - 1),
+        message=f"{page_num}페이지: DESCRIPTION 컬럼 OCR 중",
+    )
     items = [
         DescriptionItem(
             page=page_num,
@@ -375,6 +428,13 @@ def extract_page_items(
     ]
 
     if debug_dir:
+        emit_progress(
+            progress_callback,
+            stage="overlay",
+            page=page_num,
+            items=len(items),
+            message=f"{page_num}페이지: 원본 위치 표시 이미지 생성 중",
+        )
         debug_dir.mkdir(parents=True, exist_ok=True)
         vis = rotated.copy()
         cv2.rectangle(vis, (x1, 0), (x2, vis.shape[0] - 1), (255, 0, 0), 4)
@@ -402,6 +462,14 @@ def extract_page_items(
 
     meta["items"] = len(items)
     meta["column_bounds"] = bounds
+    emit_progress(
+        progress_callback,
+        stage="page_done",
+        page=page_num,
+        rotation=angle,
+        items=len(items),
+        message=f"{page_num}페이지 완료: {len(items)}개 추출",
+    )
     return items, meta
 
 
@@ -412,21 +480,52 @@ def extract_descriptions(
     dpi: int,
     first_line_only: bool,
     debug_dir: Path | None,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[DescriptionItem]:
     all_items: list[DescriptionItem] = []
     page_meta = []
 
     with tempfile.TemporaryDirectory(prefix="pdf_desc_extract_") as tmp:
+        emit_progress(
+            progress_callback,
+            stage="render",
+            message=f"PDF를 {dpi} DPI 이미지로 변환 중",
+        )
         pages = render_pdf(pdf_path, Path(tmp), dpi=dpi)
+        total_pages = len(pages)
+        emit_progress(
+            progress_callback,
+            stage="render_done",
+            total_pages=total_pages,
+            message=f"PDF 변환 완료: {total_pages}페이지",
+        )
         for page_idx, page_path in enumerate(pages, start=1):
+            emit_progress(
+                progress_callback,
+                stage="page_start",
+                page=page_idx,
+                total_pages=total_pages,
+                message=f"{page_idx}/{total_pages}페이지 처리 시작",
+            )
             img = cv2.imread(str(page_path))
             if img is None:
+                emit_progress(
+                    progress_callback,
+                    stage="page_done",
+                    page=page_idx,
+                    total_pages=total_pages,
+                    items=0,
+                    message=f"{page_idx}페이지 이미지를 읽지 못함",
+                )
                 continue
             items, meta = extract_page_items(
                 img,
                 page_idx,
                 first_line_only=first_line_only,
                 debug_dir=debug_dir,
+                progress_callback=lambda event, total_pages=total_pages: progress_callback(
+                    {**event, "total_pages": total_pages}
+                ) if progress_callback else None,
             )
             all_items.extend(items)
             page_meta.append(meta)

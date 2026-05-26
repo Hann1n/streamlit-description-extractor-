@@ -25,7 +25,13 @@ def png_size(image_bytes: bytes) -> tuple[int, int]:
     return 1, 1
 
 
-def run_extract(pdf_bytes: bytes, filename: str, include_all_lines: bool, dpi: int):
+def run_extract(
+    pdf_bytes: bytes,
+    filename: str,
+    include_all_lines: bool,
+    dpi: int,
+    progress_callback=None,
+):
     from scripts.extract_description_column import extract_descriptions
 
     with tempfile.TemporaryDirectory(prefix="desc_streamlit_") as tmp:
@@ -44,6 +50,7 @@ def run_extract(pdf_bytes: bytes, filename: str, include_all_lines: bool, dpi: i
             dpi=dpi,
             first_line_only=not include_all_lines,
             debug_dir=debug_dir,
+            progress_callback=progress_callback,
         )
 
         overlays = []
@@ -287,17 +294,50 @@ if run_clicked:
     all_results = []
     text_blocks = []
     progress_bar = progress.progress(0)
+    progress_log: list[str] = []
+    progress_status = result_placeholder.empty()
+    progress_detail = result_placeholder.empty()
+
+    def show_progress(message: str) -> None:
+        progress_status.info(message)
+        if not progress_log or progress_log[-1] != message:
+            progress_log.append(message)
+        progress_detail.text_area(
+            "진행 상황",
+            value="\n".join(progress_log[-14:]),
+            height=220,
+            disabled=True,
+        )
 
     for idx, uploaded in enumerate(pdf_uploads, start=1):
+        show_progress(f"{idx}/{len(pdf_uploads)} 파일 처리 시작: {uploaded.name}")
         status.write(f"{idx}/{len(pdf_uploads)} 처리 중: {uploaded.name}")
+
+        def update_file_progress(event: dict, file_index: int = idx, filename: str = uploaded.name) -> None:
+            total_files = max(1, len(pdf_uploads))
+            total_pages = int(event.get("total_pages") or 0)
+            page = int(event.get("page") or 0)
+            if total_pages > 0 and page > 0:
+                page_fraction = min(1.0, max(0.0, page / total_pages))
+                overall = ((file_index - 1) + page_fraction) / total_files
+            else:
+                overall = (file_index - 1) / total_files
+            progress_bar.progress(min(1.0, max(0.0, overall)))
+
+            message = str(event.get("message") or "처리 중")
+            status.write(message)
+            show_progress(f"{filename} - {message}")
+
         try:
             items, text_output, json_output, overlays = run_extract(
                 uploaded.getvalue(),
                 Path(uploaded.name).name,
                 include_all_lines=include_all_lines,
                 dpi=dpi,
+                progress_callback=update_file_progress,
             )
         except Exception as exc:
+            show_progress(f"{uploaded.name} - 오류: {exc}")
             all_results.append(
                 {
                     "file": uploaded.name,
@@ -307,6 +347,7 @@ if run_clicked:
             )
             text_blocks.append(f"[{uploaded.name}]\nERROR: {exc}")
         else:
+            show_progress(f"{uploaded.name} - 완료: {len(items)}개 DESCRIPTION 추출")
             all_results.append(
                 {
                     "file": uploaded.name,
@@ -324,6 +365,7 @@ if run_clicked:
         progress_bar.progress(idx / len(pdf_uploads))
 
     status.write("처리 완료")
+    show_progress("전체 처리 완료")
 
     combined_text = "\n\n".join(text_blocks).strip() + "\n"
     combined_json = {
