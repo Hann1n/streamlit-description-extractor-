@@ -18,6 +18,45 @@ System dependencies:
 
 On Streamlit Community Cloud, these are installed from `packages.txt`.
 
+## Windows install
+
+For Windows users, double-click this once:
+
+```txt
+Install-Windows.bat
+```
+
+Or run this from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-Windows.ps1
+```
+
+The installer checks or installs:
+
+- Python 3.11
+- Tesseract OCR
+- Poppler PDF tools
+- Python packages in `.venv`
+
+After installation, double-click:
+
+```txt
+Start-Windows.bat
+```
+
+The installer also creates a desktop shortcut named:
+
+```txt
+PDF DESCRIPTION Extractor
+```
+
+The app opens at:
+
+```txt
+http://127.0.0.1:8501
+```
+
 ## Run with Docker
 
 ```bash
