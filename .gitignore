@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.streamlit-env/
+.venv/
+venv/
+env/
+*.log
+*.tmp
+stream/
+outputs/
+debug/
