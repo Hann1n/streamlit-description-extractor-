@@ -108,11 +108,23 @@ def horizontal_line_groups(img: np.ndarray, x1: int, x2: int) -> list[int]:
     return group_positions(strong, max_gap=10)
 
 
-def ocr_words(img: np.ndarray) -> list[dict]:
+def ocr_words(img: np.ndarray, config: str = "--oem 3 --psm 6", max_width: int | None = None) -> list[dict]:
+    scale = 1.0
+    ocr_img = img
+    if max_width and img.shape[1] > max_width:
+        scale = max_width / img.shape[1]
+        ocr_img = cv2.resize(
+            img,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+
     data = pytesseract.image_to_data(
-        img,
+        ocr_img,
         lang="eng",
-        config="--oem 3 --psm 6",
+        config=config,
         output_type=pytesseract.Output.DICT,
     )
     words = []
@@ -129,10 +141,10 @@ def ocr_words(img: np.ndarray) -> list[dict]:
                 "text": cleaned,
                 "upper": cleaned.upper(),
                 "conf": conf,
-                "left": int(data["left"][idx]),
-                "top": int(data["top"][idx]),
-                "width": int(data["width"][idx]),
-                "height": int(data["height"][idx]),
+                "left": int(data["left"][idx] / scale),
+                "top": int(data["top"][idx] / scale),
+                "width": int(data["width"][idx] / scale),
+                "height": int(data["height"][idx] / scale),
             }
         )
     return words
@@ -152,7 +164,7 @@ def choose_page_orientation(img: np.ndarray) -> tuple[np.ndarray, int, dict | No
     best = (None, 0, None, -1.0)
     for angle in (0, 90, 180, 270):
         rotated = rotate_image(img, angle)
-        words = ocr_words(rotated)
+        words = ocr_words(rotated, max_width=1600)
         header = find_description_header(words)
         if header is None:
             score = 0.0
@@ -184,14 +196,6 @@ def find_column_bounds(img: np.ndarray, header: dict) -> tuple[int, int] | None:
     return left, right
 
 
-def preprocess_cell(cell: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-    scale = 2.0
-    resized = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    _, thresh = cv2.threshold(resized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return thresh
-
-
 def clean_ocr_text(text: str, first_line_only: bool) -> tuple[str, str]:
     raw_lines = []
     for line in text.splitlines():
@@ -205,6 +209,93 @@ def clean_ocr_text(text: str, first_line_only: bool) -> tuple[str, str]:
     if first_line_only:
         return (raw_lines[0] if raw_lines else ""), raw
     return " / ".join(raw_lines), raw
+
+
+def words_to_cell_text(words: list[dict], first_line_only: bool) -> tuple[str, str]:
+    if not words:
+        return "", ""
+
+    line_groups: list[list[dict]] = []
+    for word in sorted(words, key=lambda item: (item["top"], item["left"])):
+        center_y = word["top"] + word["height"] / 2
+        matched = False
+        for group in line_groups:
+            group_center = np.mean([item["top"] + item["height"] / 2 for item in group])
+            if abs(center_y - group_center) <= max(10, word["height"] * 0.7):
+                group.append(word)
+                matched = True
+                break
+        if not matched:
+            line_groups.append([word])
+
+    lines = []
+    for group in line_groups:
+        group.sort(key=lambda item: item["left"])
+        line = " ".join(item["text"] for item in group)
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            lines.append(line)
+
+    return clean_ocr_text("\n".join(lines), first_line_only=first_line_only)
+
+
+def ocr_description_rows(
+    rotated: np.ndarray,
+    x1: int,
+    x2: int,
+    lower_lines: list[int],
+    first_line_only: bool,
+) -> list[tuple[int, str, str, tuple[int, int, int, int]]]:
+    pad_x = 6
+    valid_pairs = [
+        (top, bottom)
+        for top, bottom in zip(lower_lines, lower_lines[1:])
+        if bottom - top >= 20
+    ]
+    if not valid_pairs:
+        return []
+
+    y1 = min(top for top, _ in valid_pairs)
+    y2 = max(bottom for _, bottom in valid_pairs)
+    crop = rotated[y1:y2, x1 + pad_x:x2 - pad_x]
+    if crop.size == 0:
+        return []
+
+    words = ocr_words(crop, config="--oem 3 --psm 6")
+    for word in words:
+        word["left"] += x1 + pad_x
+        word["top"] += y1
+
+    row_results = []
+    row_num = 0
+    row_heights = [bottom - top for top, bottom in valid_pairs]
+    typical_row_height = float(np.median(row_heights)) if row_heights else 0.0
+
+    for top, bottom in valid_pairs:
+        row_height = bottom - top
+        if typical_row_height and row_height > typical_row_height * 3:
+            break
+        row_num += 1
+
+        pad_y = max(4, int(row_height * 0.07))
+        cell_top = top + pad_y
+        cell_bottom = bottom - pad_y
+        row_words = [
+            word for word in words
+            if cell_top <= word["top"] + word["height"] / 2 <= cell_bottom
+        ]
+        cleaned, raw = words_to_cell_text(row_words, first_line_only=first_line_only)
+        if cleaned:
+            row_results.append(
+                (
+                    row_num,
+                    cleaned,
+                    raw,
+                    (x1 + pad_x, cell_top, x2 - pad_x, cell_bottom),
+                )
+            )
+
+    return row_results
 
 
 def rotated_bbox_to_original(
@@ -266,49 +357,22 @@ def extract_page_items(
     if len(lower_lines) < 2:
         return [], meta
 
-    items: list[DescriptionItem] = []
-    consecutive_blank_rows = 0
-    row_num = 0
-    row_heights = [bottom - top for top, bottom in zip(lower_lines, lower_lines[1:]) if bottom - top >= 20]
-    typical_row_height = float(np.median(row_heights)) if row_heights else 0.0
-
-    for top, bottom in zip(lower_lines, lower_lines[1:]):
-        row_height = bottom - top
-        if row_height < 20:
-            continue
-        if typical_row_height and row_height > typical_row_height * 3:
-            break
-        row_num += 1
-
-        pad_x = 6
-        pad_y = max(4, int(row_height * 0.07))
-        crop = rotated[top + pad_y: bottom - pad_y, x1 + pad_x: x2 - pad_x]
-        if crop.size == 0:
-            continue
-
-        ocr_input = preprocess_cell(crop)
-        text = pytesseract.image_to_string(
-            ocr_input,
-            lang="eng",
-            config="--oem 3 --psm 6",
+    items = [
+        DescriptionItem(
+            page=page_num,
+            row=row_num,
+            text=cleaned,
+            raw_text=raw,
+            bbox=bbox,
         )
-        cleaned, raw = clean_ocr_text(text, first_line_only=first_line_only)
-        if cleaned:
-            consecutive_blank_rows = 0
-            items.append(
-                DescriptionItem(
-                    page=page_num,
-                    row=row_num,
-                    text=cleaned,
-                    raw_text=raw,
-                    bbox=(x1 + pad_x, top + pad_y, x2 - pad_x, bottom - pad_y),
-                )
-            )
-        else:
-            consecutive_blank_rows += 1
-
-        if consecutive_blank_rows >= 6:
-            break
+        for row_num, cleaned, raw, bbox in ocr_description_rows(
+            rotated,
+            x1,
+            x2,
+            lower_lines,
+            first_line_only=first_line_only,
+        )
+    ]
 
     if debug_dir:
         debug_dir.mkdir(parents=True, exist_ok=True)

@@ -3,15 +3,13 @@ from __future__ import annotations
 import base64
 import html
 import json
+import struct
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
-import cv2
 import streamlit as st
 import streamlit.components.v1 as components
-
-from scripts.extract_description_column import extract_descriptions
 
 
 st.set_page_config(
@@ -21,7 +19,15 @@ st.set_page_config(
 )
 
 
+def png_size(image_bytes: bytes) -> tuple[int, int]:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n") and len(image_bytes) >= 24:
+        return struct.unpack(">II", image_bytes[16:24])
+    return 1, 1
+
+
 def run_extract(pdf_bytes: bytes, filename: str, include_all_lines: bool, dpi: int):
+    from scripts.extract_description_column import extract_descriptions
+
     with tempfile.TemporaryDirectory(prefix="desc_streamlit_") as tmp:
         tmp_dir = Path(tmp)
         input_pdf = tmp_dir / filename
@@ -45,8 +51,8 @@ def run_extract(pdf_bytes: bytes, filename: str, include_all_lines: bool, dpi: i
             page_key = image_path.name.replace("_description_column.png", "")
             original_path = debug_dir / f"{page_key}_original_overlay.png"
             page_num = int(page_key.replace("page_", ""))
-            image = cv2.imread(str(image_path))
-            height, width = image.shape[:2] if image is not None else (1, 1)
+            upright_bytes = image_path.read_bytes()
+            width, height = png_size(upright_bytes)
             page_items = [
                 {
                     "row": item.row,
@@ -60,7 +66,7 @@ def run_extract(pdf_bytes: bytes, filename: str, include_all_lines: bool, dpi: i
             overlays.append(
                 {
                     "name": page_key,
-                    "upright_bytes": image_path.read_bytes(),
+                    "upright_bytes": upright_bytes,
                     "original_bytes": original_path.read_bytes() if original_path.exists() else None,
                     "width": width,
                     "height": height,
@@ -258,8 +264,8 @@ with st.sidebar:
     dpi = st.selectbox(
         "PDF 변환 해상도",
         [200, 300, 400],
-        index=1,
-        help="표 글자가 작으면 400, 속도가 중요하면 200을 선택하세요.",
+        index=0,
+        help="기본값 200이 가장 빠릅니다. 표 글자가 작거나 OCR이 누락되면 300 또는 400으로 올리세요.",
     )
 
     st.divider()
