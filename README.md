@@ -17,3 +17,23 @@ System dependencies:
 - `tesseract-ocr` for OCR
 
 On Streamlit Community Cloud, these are installed from `packages.txt`.
+
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+
+Open:
+
+```txt
+http://localhost:8502
+```
+
+To stop:
+
+```bash
+docker compose down
+```
+
+The Docker image installs Poppler and Tesseract inside the container, so the host machine only needs Docker.

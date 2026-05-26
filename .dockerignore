@@ -1,0 +1,15 @@
+.git
+.streamlit
+__pycache__
+*.pyc
+.DS_Store
+.venv
+.streamlit-env
+stream
+debug
+*.pdf
+*.png
+*.json
+*.txt
+!requirements.txt
+!packages.txt
