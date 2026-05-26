@@ -84,6 +84,41 @@ def run_extract(
         return items, output_txt.read_text(encoding="utf-8"), output_json.read_text(encoding="utf-8"), overlays
 
 
+def page_counts_for_results(results: list[dict]) -> list[dict]:
+    rows = []
+    for result in results:
+        counts: dict[int, int] = {}
+        for item in result.get("items", []):
+            counts[item.page] = counts.get(item.page, 0) + 1
+        overlay_pages = {
+            int(overlay["name"].replace("page_", ""))
+            for overlay in result.get("overlays", [])
+            if str(overlay.get("name", "")).startswith("page_")
+        }
+        pages = sorted(set(counts) | overlay_pages)
+        for page in pages:
+            rows.append(
+                {
+                    "file": result["file"],
+                    "page": page,
+                    "descriptions": counts.get(page, 0),
+                }
+            )
+    return rows
+
+
+def grouped_text_by_page(results: list[dict]) -> str:
+    blocks = []
+    for result in results:
+        page_items: dict[int, list] = {}
+        for item in result.get("items", []):
+            page_items.setdefault(item.page, []).append(item)
+        for page in sorted(page_items):
+            lines = [item.text for item in sorted(page_items[page], key=lambda item: item.row)]
+            blocks.append(f"[{result['file']} / page {page}]\n" + "\n".join(lines))
+    return "\n\n".join(blocks).strip() + ("\n" if blocks else "")
+
+
 def render_interactive_overlay(overlay: dict) -> None:
     image_base64 = base64.b64encode(overlay["upright_bytes"]).decode("ascii")
     width = max(1, int(overlay.get("width", 1)))
@@ -382,6 +417,7 @@ if run_clicked:
     }
     st.session_state["results"] = all_results
     st.session_state["text_output"] = combined_text
+    st.session_state["page_text_output"] = grouped_text_by_page(all_results)
     st.session_state["json_output"] = json.dumps(combined_json, ensure_ascii=False, indent=2)
     st.session_state["overlay_page_index"] = 0
 
@@ -405,6 +441,14 @@ with result_placeholder:
         m2.metric("성공", f"{len(successful)}개")
         m3.metric("추출 항목", f"{total_items}개")
 
+        page_rows = page_counts_for_results(results)
+        if page_rows:
+            st.write("페이지별 추출 현황")
+            st.dataframe(page_rows, use_container_width=True, hide_index=True)
+            zero_pages = [row for row in page_rows if row["descriptions"] == 0]
+            if zero_pages:
+                st.warning("일부 페이지에서 DESCRIPTION 항목을 추출하지 못했습니다. 해상도를 300으로 올려 다시 실행해보세요.")
+
         if failed:
             with st.expander("실패한 PDF 확인", expanded=True):
                 for result in failed:
@@ -415,6 +459,13 @@ with result_placeholder:
             value=text_output,
             height=420,
         )
+
+        with st.expander("페이지별 복사용 텍스트", expanded=False):
+            st.text_area(
+                "페이지 구분 포함",
+                value=st.session_state.get("page_text_output", ""),
+                height=360,
+            )
 
         col1, col2 = st.columns(2)
         with col1:
